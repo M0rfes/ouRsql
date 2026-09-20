@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -13,41 +14,89 @@ const VAL_SIZE: usize = 8;
 const TOOMSTONE_SIZE: u8 = 1;
 
 struct Log {
-    path: String,
+    path: PathBuf,
     fp: File,
 }
+
 impl Log {
     fn new(path: String) -> Result<Self> {
+        let file_path = PathBuf::from(&path);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .append(true)
             .mode(0o644)
-            .open(path.clone())
+            .open(&file_path)
             .context(format!("failed to open file {}", path))?;
-
-        Ok(Self { fp: file, path })
+        file.sync_all()
+            .context(format!("{:?} sync failed", file_path))?;
+        let Some(parent) = file_path.parent() else {
+            return Err(anyhow!("can't find parent for {}", path));
+        };
+        let dir = File::open(parent).context(format!("failed to open {:?}", parent))?;
+        dir.sync_all()
+            .context(format!("{:?} sync failed", parent))?;
+        Ok(Self {
+            fp: file,
+            path: file_path,
+        })
     }
 
-    fn write(&mut self, kv: KV) -> Result<()> {
+    fn write_all(&mut self, kv: &KV) -> Result<()> {
         let bytes: Bytes = kv.into();
-        self.fp.write_all(&bytes).context("failed to write")
+        self.fp.write_all(&bytes).context("failed to write")?;
+        self.fp.sync_all().context("file sync failed")
     }
 
-    fn read(&self) -> Result<KV> {
-        let bytes = fs::read(self.path.as_str())?;
-        let bytes = Bytes::from(bytes);
-        let kv = KV::try_from(bytes).context(format!("{} not a valid db", self.path))?;
-        Ok(kv)
+    fn append(&mut self, key: &Bytes, val: &Bytes, toomstone: bool) -> Result<()> {
+        let mut buf: Vec<u8> = Vec::with_capacity(key.len() + val.len() + TOOMSTONE_SIZE as usize);
+        buf.extend_from_slice(&key.len().to_be_bytes());
+        buf.extend_from_slice(&val.len().to_be_bytes());
+        if toomstone {
+            buf.extend_from_slice(&1u8.to_be_bytes())
+        } else {
+            buf.extend_from_slice(&0u8.to_be_bytes())
+        }
+        buf.extend_from_slice(&key);
+        buf.extend_from_slice(&val);
+        self.fp.write_all(&buf).context(format!(
+            "failed to append {:?}:{:?} { }",
+            key, val, toomstone
+        ))?;
+        self.fp.sync_all().context("sync after append failed")
     }
 }
 
-struct KV {
-    pub mem: BTreeMap<Bytes, (Bytes, bool)>,
+struct KV<L = Log> {
+    mem: BTreeMap<Bytes, (Bytes, bool)>,
+    loger: L,
+}
+
+impl KV {
+    fn set(&mut self, key: Bytes, val: Bytes) -> Result<Option<(Bytes, bool)>> {
+        let ok = self.mem.insert(key.clone(), (val.clone(), false));
+        self.loger.append(&key, &val, false)?;
+        Ok(ok)
+    }
+
+    fn get(&self, key: &Bytes) -> Option<&(Bytes, bool)> {
+        self.mem.get(key)
+    }
+
+    fn delete(&mut self, key: Bytes) -> Result<Option<(Bytes, (Bytes, bool))>> {
+        let Some((k, val)) = self.mem.remove_entry(&key) else {
+            return Ok(None);
+        };
+        let (value, _) = val;
+        let ok = self.mem.insert(k.clone(), (value.clone(), true));
+        self.loger.append(&k, &value, true)?;
+        Ok(Some((k, (value, true))))
+    }
 }
 
 // Serialization
-impl Into<Bytes> for KV {
+impl Into<Bytes> for &KV {
     fn into(self) -> Bytes {
         let mut buff = Vec::with_capacity(self.mem.iter().fold(0, |acc, (k, v)| {
             acc + k.len() + v.0.len() + TOOMSTONE_SIZE as usize
@@ -71,28 +120,29 @@ impl Into<Bytes> for KV {
     }
 }
 
-// Deserialization
-impl TryFrom<Bytes> for KV {
+impl TryFrom<Log> for KV {
     type Error = anyhow::Error;
 
-    fn try_from(mut value: Bytes) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: Log) -> std::result::Result<Self, Self::Error> {
+        let bytes = fs::read(&value.path).context(format!("failed to read {:?}", value.path))?;
+
+        let mut bytes = Bytes::from(bytes);
         let mut mem = BTreeMap::new();
-        while value.len() >= KEY_SIZE + VAL_SIZE + TOOMSTONE_SIZE as usize {
+        while bytes.len() >= KEY_SIZE + VAL_SIZE + TOOMSTONE_SIZE as usize {
             assert!(KEY_SIZE == 8); // to make sure get_u64 is upadted if size is chanegd
-            let key_len = value.try_get_u64().context("not a valid u64 key length")? as usize;
+            let key_len = bytes.try_get_u64().context("not a valid u64 key length")? as usize;
             assert!(VAL_SIZE == 8); // to make sure get_u64 is upadted if size is chanegd
-            let val_len = value
+            let val_len = bytes
                 .try_get_u64()
                 .context("not a valid u64 value length ")? as usize;
-            let toomstone = value.try_get_u8().context("not a valid u8 toomstone")? == 1;
+            let toomstone = bytes.try_get_u8().context("not a valid u8 toomstone")? == 1;
 
-            let key = value.copy_to_bytes(key_len);
-            let val = value.copy_to_bytes(val_len);
+            let key = bytes.copy_to_bytes(key_len);
+            let val = bytes.copy_to_bytes(val_len);
 
             mem.insert(key, (val, toomstone));
         }
-
-        Ok(Self { mem })
+        Ok(Self { mem, loger: value })
     }
 }
 
