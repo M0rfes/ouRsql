@@ -1,8 +1,15 @@
-[package]
-name = "ouRsql"
+[workspace]
+resolver = "3"
+members = [
+    "crates/*",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+kv = { path = "crates/kv" }
 anyhow = "1.0.104"
 bytes = "1.12.1"
+tempfile = "3.17.1"
