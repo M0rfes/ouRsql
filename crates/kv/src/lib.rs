@@ -1,5 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result, anyhow, bail, ensure};
 use bytes::{Buf, Bytes};
+use crc32fast::Hasher;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -8,8 +9,18 @@ use std::path::{Path, PathBuf};
 
 pub const KEY_SIZE: usize = 8;
 pub const VAL_SIZE: usize = 8;
-pub const TOOMSTONE_SIZE: u8 = 1;
-pub const TOMBSTONE_SIZE: u8 = TOOMSTONE_SIZE;
+pub const TOMBSTONE_SIZE: u8 = 1;
+pub const CHECKSUM_SIZE: usize = 4;
+
+fn chekcsum(key: &Bytes, val: &Bytes, tombstone: u8) -> u32 {
+    let mut haser = Hasher::new();
+    haser.update(&key.len().to_be_bytes());
+    haser.update(&val.len().to_be_bytes());
+    haser.update(&tombstone.to_be_bytes());
+    haser.update(key);
+    haser.update(val);
+    haser.finalize()
+}
 
 pub struct Log {
     pub path: PathBuf,
@@ -53,7 +64,11 @@ impl Log {
     }
 
     pub fn append(&mut self, key: &Bytes, val: &Bytes, toomstone: bool) -> Result<()> {
-        let mut buf: Vec<u8> = Vec::with_capacity(key.len() + val.len() + TOOMSTONE_SIZE as usize);
+        let mut buf: Vec<u8> = Vec::with_capacity(
+            CHECKSUM_SIZE + KEY_SIZE + VAL_SIZE + TOMBSTONE_SIZE as usize + key.len() + val.len(),
+        );
+        let has = chekcsum(key, val, if toomstone { 1 } else { 0 });
+        buf.extend_from_slice(&has.to_be_bytes());
         buf.extend_from_slice(&key.len().to_be_bytes());
         buf.extend_from_slice(&val.len().to_be_bytes());
         if toomstone {
@@ -114,12 +129,19 @@ impl KV<Log> {
 impl From<&KV> for Bytes {
     fn from(kv: &KV) -> Self {
         let mut buff = Vec::with_capacity(kv.mem.iter().fold(0, |acc, (k, v)| {
-            acc + k.len() + v.0.len() + TOOMSTONE_SIZE as usize
+            acc + k.len() + v.0.len() + TOMBSTONE_SIZE as usize
         }));
         for (key, val) in kv.mem.iter() {
             let mut buffer = Vec::with_capacity(
-                KEY_SIZE + VAL_SIZE + TOOMSTONE_SIZE as usize + key.len() + val.0.len(),
+                CHECKSUM_SIZE
+                    + KEY_SIZE
+                    + VAL_SIZE
+                    + TOMBSTONE_SIZE as usize
+                    + key.len()
+                    + val.0.len(),
             );
+            let has = chekcsum(&key, &val.0, if val.1 { 1 } else { 0 });
+            buffer.extend_from_slice(&has.to_be_bytes());
             buffer.extend_from_slice(&key.len().to_be_bytes());
             buffer.extend_from_slice(&val.0.len().to_be_bytes());
             if val.1 {
@@ -138,25 +160,52 @@ impl From<&KV> for Bytes {
 impl TryFrom<Log> for KV {
     type Error = anyhow::Error;
 
-    fn try_from(value: Log) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: Log) -> Result<Self, Self::Error> {
         let bytes = fs::read(&value.path).context(format!("failed to read {:?}", value.path))?;
 
         let mut bytes = Bytes::from(bytes);
         let mut mem = BTreeMap::new();
-        while bytes.len() >= KEY_SIZE + VAL_SIZE + TOOMSTONE_SIZE as usize {
+        while bytes.len() >= CHECKSUM_SIZE + KEY_SIZE + VAL_SIZE + TOMBSTONE_SIZE as usize {
+            let actual_has = bytes.try_get_u32().context("failed to get checksum")?;
             assert!(KEY_SIZE == 8); // to make sure get_u64 is updated if size is changed
             let key_len = bytes.try_get_u64().context("not a valid u64 key length")? as usize;
             assert!(VAL_SIZE == 8); // to make sure get_u64 is updated if size is changed
             let val_len = bytes
                 .try_get_u64()
                 .context("not a valid u64 value length")? as usize;
-            let toomstone = bytes.try_get_u8().context("not a valid u8 toomstone")? == 1;
+            let tombstone_byte = bytes.try_get_u8().context("not a valid u8 toomstone")?;
+
+            // Validate tombstone format
+            let tombstone = match tombstone_byte {
+                0 => false,
+                1 => true,
+                other => bail!("invalid tombstone flag: {}, expected 0 or 1", other),
+            };
+
+            // 2. Prevent panics: ensure file has enough remaining bytes for the payload
+            ensure!(
+                bytes.len() >= key_len + val_len,
+                "log truncated: needed {} bytes for payload (key={}, val={}), but only {} bytes remaining",
+                key_len + val_len,
+                key_len,
+                val_len,
+                bytes.len()
+            );
 
             let key = bytes.copy_to_bytes(key_len);
             let val = bytes.copy_to_bytes(val_len);
+            let has = chekcsum(&key, &val, if tombstone { 1 } else { 0 });
+            if has != actual_has {
+                bail!("checksum didnst match")
+            }
 
-            mem.insert(key, (val, toomstone));
+            mem.insert(key, (val, tombstone));
         }
+        ensure!(
+            bytes.is_empty(),
+            "trailing corrupted bytes at end of log file ({ } bytes remaining)",
+            bytes.len()
+        );
         Ok(Self { mem, loger: value })
     }
 }
