@@ -104,10 +104,8 @@ impl KV<Log> {
         KV::try_from(log)
     }
 
-    pub fn set(&mut self, key: Bytes, val: Bytes) -> Result<Option<(Bytes, bool)>> {
-        let ok = self.mem.insert(key.clone(), (val.clone(), false));
-        self.loger.append(&key, &val, false)?;
-        Ok(ok)
+    pub fn set(&mut self, key: Bytes, val: Bytes) -> Result<bool> {
+        self.setEx(key, val, UpdateMode::insert)
     }
 
     pub fn get(&self, key: &Bytes) -> Option<&(Bytes, bool)> {
@@ -209,6 +207,46 @@ impl TryFrom<Log> for KV {
             bytes.len()
         );
         Ok(Self { mem, loger: value })
+    }
+}
+
+enum UpdateMode {
+    insert,
+    upadte,
+    upsert,
+}
+
+impl KV<Log> {
+    fn setEx(&mut self, key: Bytes, val: Bytes, mode: UpdateMode) -> Result<bool> {
+        match mode {
+            UpdateMode::insert => {
+                if self.mem.contains_key(&key) {
+                    return Ok(false);
+                }
+
+                ensure!(
+                    self.mem.insert(key, (val, false)).is_none(),
+                    "should have been an inster but got updated"
+                );
+                return Ok(true);
+            }
+
+            UpdateMode::upadte => {
+                if !self.mem.contains_key(&key) {
+                    return Ok(false);
+                }
+                ensure!(
+                    self.mem.insert(key, (val, false)).is_some(),
+                    "should have been an updae but got inserted"
+                );
+                return Ok(true);
+            }
+
+            UpdateMode::upsert => {
+                self.mem.insert(key, (val, false));
+                return Ok(true);
+            }
+        }
     }
 }
 
