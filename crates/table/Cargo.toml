@@ -1,0 +1,11 @@
+[package]
+name = "table"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

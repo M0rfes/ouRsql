@@ -1,4 +1,4 @@
-use anyhow::{Context, Error, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, Bytes};
 use crc32fast::Hasher;
 use std::collections::BTreeMap;
@@ -14,9 +14,9 @@ pub const CHECKSUM_SIZE: usize = 4;
 
 fn chekcsum(key: &Bytes, val: &Bytes, tombstone: u8) -> u32 {
     let mut haser = Hasher::new();
-    haser.update(&key.len().to_be_bytes());
-    haser.update(&val.len().to_be_bytes());
-    haser.update(&tombstone.to_be_bytes());
+    haser.update(&key.len().to_le_bytes());
+    haser.update(&val.len().to_le_bytes());
+    haser.update(&tombstone.to_le_bytes());
     haser.update(key);
     haser.update(val);
     haser.finalize()
@@ -68,13 +68,13 @@ impl Log {
             CHECKSUM_SIZE + KEY_SIZE + VAL_SIZE + TOMBSTONE_SIZE as usize + key.len() + val.len(),
         );
         let has = chekcsum(key, val, if toomstone { 1 } else { 0 });
-        buf.extend_from_slice(&has.to_be_bytes());
-        buf.extend_from_slice(&key.len().to_be_bytes());
-        buf.extend_from_slice(&val.len().to_be_bytes());
+        buf.extend_from_slice(&has.to_le_bytes());
+        buf.extend_from_slice(&key.len().to_le_bytes());
+        buf.extend_from_slice(&val.len().to_le_bytes());
         if toomstone {
-            buf.extend_from_slice(&1u8.to_be_bytes())
+            buf.extend_from_slice(&1u8.to_le_bytes())
         } else {
-            buf.extend_from_slice(&0u8.to_be_bytes())
+            buf.extend_from_slice(&0u8.to_le_bytes())
         }
         buf.extend_from_slice(key);
         buf.extend_from_slice(val);
@@ -141,9 +141,9 @@ impl From<&KV> for Bytes {
                     + val.0.len(),
             );
             let has = chekcsum(&key, &val.0, if val.1 { 1 } else { 0 });
-            buffer.extend_from_slice(&has.to_be_bytes());
-            buffer.extend_from_slice(&key.len().to_be_bytes());
-            buffer.extend_from_slice(&val.0.len().to_be_bytes());
+            buffer.extend_from_slice(&has.to_le_bytes());
+            buffer.extend_from_slice(&key.len().to_le_bytes());
+            buffer.extend_from_slice(&val.0.len().to_le_bytes());
             if val.1 {
                 buffer.extend_from_slice(&[1])
             } else {
@@ -166,12 +166,14 @@ impl TryFrom<Log> for KV {
         let mut bytes = Bytes::from(bytes);
         let mut mem = BTreeMap::new();
         while bytes.len() >= CHECKSUM_SIZE + KEY_SIZE + VAL_SIZE + TOMBSTONE_SIZE as usize {
-            let actual_has = bytes.try_get_u32().context("failed to get checksum")?;
+            let actual_has = bytes.try_get_u32_le().context("failed to get checksum")?;
             assert!(KEY_SIZE == 8); // to make sure get_u64 is updated if size is changed
-            let key_len = bytes.try_get_u64().context("not a valid u64 key length")? as usize;
+            let key_len = bytes
+                .try_get_u64_le()
+                .context("not a valid u64 key length")? as usize;
             assert!(VAL_SIZE == 8); // to make sure get_u64 is updated if size is changed
             let val_len = bytes
-                .try_get_u64()
+                .try_get_u64_le()
                 .context("not a valid u64 value length")? as usize;
             let tombstone_byte = bytes.try_get_u8().context("not a valid u8 toomstone")?;
 
