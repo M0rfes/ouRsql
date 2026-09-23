@@ -103,23 +103,32 @@ impl KV<Log> {
         let log = Log::new(path)?;
         KV::try_from(log)
     }
+    pub fn get(&self, key: &Bytes) -> Option<&Bytes> {
+        match self.mem.get(key) {
+            Some((v, false)) => Some(v),
+            _ => None,
+        }
+    }
 
     pub fn set(&mut self, key: Bytes, val: Bytes) -> Result<bool> {
-        self.setEx(key, val, UpdateMode::insert)
+        self.setEx(key, val, UpdateMode::Insert)
     }
 
-    pub fn get(&self, key: &Bytes) -> Option<&(Bytes, bool)> {
-        self.mem.get(key)
+    pub fn update(&mut self, key: Bytes, val: Bytes) -> Result<bool> {
+        self.setEx(key, val, UpdateMode::Upadte)
     }
 
-    pub fn delete(&mut self, key: Bytes) -> Result<Option<(Bytes, (Bytes, bool))>> {
-        let Some((k, val)) = self.mem.remove_entry(&key) else {
-            return Ok(None);
-        };
-        let (value, _) = val;
-        let _ok = self.mem.insert(k.clone(), (value.clone(), true));
-        self.loger.append(&k, &value, true)?;
-        Ok(Some((k, (value, true))))
+    pub fn upsert(&mut self, key: Bytes, val: Bytes) -> Result<bool> {
+        self.setEx(key, val, UpdateMode::Upsert)
+    }
+
+    pub fn delete(&mut self, key: Bytes) -> Result<bool> {
+        let val = self
+            .mem
+            .get(&key)
+            .map(|(v, _)| v.clone())
+            .unwrap_or_default();
+        self.setEx(key, val, UpdateMode::Delete)
     }
 }
 
@@ -211,40 +220,45 @@ impl TryFrom<Log> for KV {
 }
 
 enum UpdateMode {
-    insert,
-    upadte,
-    upsert,
+    Insert,
+    Upadte,
+    Upsert,
+    Delete,
 }
 
 impl KV<Log> {
     fn setEx(&mut self, key: Bytes, val: Bytes, mode: UpdateMode) -> Result<bool> {
+        let is_active = matches!(self.mem.get(&key), Some((_, false)));
+
         match mode {
-            UpdateMode::insert => {
-                if self.mem.contains_key(&key) {
+            UpdateMode::Insert => {
+                if is_active {
                     return Ok(false);
                 }
-
-                ensure!(
-                    self.mem.insert(key, (val, false)).is_none(),
-                    "should have been an inster but got updated"
-                );
-                return Ok(true);
-            }
-
-            UpdateMode::upadte => {
-                if !self.mem.contains_key(&key) {
-                    return Ok(false);
-                }
-                ensure!(
-                    self.mem.insert(key, (val, false)).is_some(),
-                    "should have been an updae but got inserted"
-                );
-                return Ok(true);
-            }
-
-            UpdateMode::upsert => {
+                self.loger.append(&key, &val, false)?;
                 self.mem.insert(key, (val, false));
-                return Ok(true);
+                Ok(true)
+            }
+            UpdateMode::Upadte => {
+                if !is_active {
+                    return Ok(false);
+                }
+                self.loger.append(&key, &val, false)?;
+                self.mem.insert(key, (val, false));
+                Ok(true)
+            }
+            UpdateMode::Upsert => {
+                self.loger.append(&key, &val, false)?;
+                self.mem.insert(key, (val, false));
+                Ok(true)
+            }
+            UpdateMode::Delete => {
+                if !is_active {
+                    return Ok(false);
+                }
+                self.loger.append(&key, &val, true)?;
+                self.mem.insert(key, (val, true));
+                Ok(true)
             }
         }
     }
@@ -267,11 +281,11 @@ mod tests {
         let v1 = Bytes::from("val1");
 
         kv.set(k1.clone(), v1.clone())?;
-        assert_eq!(kv.get(&k1), Some(&(v1.clone(), false)));
+        assert_eq!(kv.get(&k1), Some(&v1.clone()));
 
         let deleted = kv.delete(k1.clone())?;
-        assert!(deleted.is_some());
-        assert_eq!(kv.get(&k1), Some(&(v1, true))); // tombstoned
+        assert!(deleted);
+        assert_eq!(kv.get(&k1), None);
 
         Ok(())
     }
@@ -297,8 +311,8 @@ mod tests {
         // Second session: recover from log
         {
             let kv = KV::open(&log_path)?;
-            assert_eq!(kv.get(&k1), Some(&(v1, false)));
-            assert_eq!(kv.get(&k2), Some(&(v2, true)));
+            assert_eq!(kv.get(&k1), Some(&v1));
+            assert_eq!(kv.get(&k2), None);
         }
 
         Ok(())

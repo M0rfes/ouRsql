@@ -1,5 +1,7 @@
+pub mod db;
 use anyhow::{Result, ensure};
 use bytes::{Buf, Bytes};
+pub use db::DB;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -104,7 +106,7 @@ impl Table {
         Bytes::from(buffer)
     }
 
-    pub fn decode_val(&self, data: &mut Bytes, row: &mut Row) -> Result<()> {
+    pub fn decode_val(&self, mut data: &[u8], row: &mut Row) -> Result<()> {
         for (i, col) in self.columns.iter().enumerate() {
             if self.pk.contains(&i) {
                 continue;
