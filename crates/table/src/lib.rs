@@ -1,4 +1,5 @@
 pub mod db;
+pub mod parser;
 use anyhow::{Result, ensure};
 use bytes::{Buf, Bytes};
 pub use db::DB;
