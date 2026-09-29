@@ -1,0 +1,38 @@
+use crate::Value;
+
+pub enum Token {
+    Select,
+    From,
+    Where,
+    Upadte,
+    Set,
+    Delete,
+    Inster,
+    INTO,
+    Value(Value),
+    Create,
+    Table(String),
+    Col(String),
+    Type(Value),
+    Is,
+    NOT,
+    NULL,
+    LT,
+    GT,
+    LTE,
+    GTE,
+    EQ,
+    Add,
+    Substract,
+    Devide,
+    As(String),
+    Asterisk,
+    // (
+    LParen,
+    //)
+    RParen,
+    Comma,
+    Semicolan,
+    True,
+    False,
+}

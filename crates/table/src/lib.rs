@@ -10,6 +10,15 @@ pub enum Value {
     Str(Bytes),
 }
 
+impl From<Bytes> for Value {
+    fn from(mut value: Bytes) -> Self {
+        let Ok(num) = value.try_get_i64_le() else {
+            return Self::Str(value);
+        };
+        Self::I64(num)
+    }
+}
+
 pub type Row = Vec<Value>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
