@@ -2,6 +2,8 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use std::iter::Peekable;
 
+use crate::parser::token::Token;
+
 pub struct Lex<I>
 where
     I: Iterator,
@@ -72,5 +74,30 @@ where
             number.push(n);
         }
         Ok(number.into_boxed_slice())
+    }
+}
+
+impl<I> Iterator for Lex<I>
+where
+    I: Iterator<Item = u8>,
+{
+    type Item = Result<Token>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.skip_whitespace();
+        let current = self.input.next()?;
+        let token = match current {
+            b'=' => Token::EQ,
+            b'+' => Token::Add,
+            b'-' => Token::Substract,
+            b'*' => Token::Asterisk,
+            b'/' => Token::Devide,
+            b',' => Token::Comma,
+            b'(' => Token::OpenParen,
+            b')' => Token::CloseParen,
+
+            _ => unreachable!(),
+        };
+        todo!()
     }
 }

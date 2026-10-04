@@ -28,9 +28,9 @@ pub enum Token {
     As(String),
     Asterisk,
     // (
-    LParen,
+    OpenParen,
     //)
-    RParen,
+    CloseParen,
     Comma,
     Semicolan,
     True,
